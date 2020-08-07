@@ -1,0 +1,24 @@
+#!/bin/bash
+
+file=$1
+interval=$2
+
+if [ ! "$file" ]; then
+  echo "Please provide a data file."
+  exit 1;
+fi
+
+if [ ! -f "$file" ]; then
+  echo "File not found: $file"
+  exit 2;
+fi
+
+if [ ! "$interval" ]; then
+  interval=3600
+fi
+
+while true; do
+  echo $(date) : updating dns records
+  cat $file | xargs -l printf "http://dynamicdns.park-your-domain.com/update?host=%s&domain=%s&password=%s\n" | xargs -l curl -s > /dev/null
+  sleep $interval 
+done
