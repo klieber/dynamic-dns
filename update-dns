@@ -1,24 +1,12 @@
 #!/bin/bash
 
-file=$1
-interval=$2
-
-if [ ! "$file" ]; then
-  echo "Please provide a data file."
-  exit 1;
-fi
-
-if [ ! -f "$file" ]; then
-  echo "File not found: $file"
-  exit 2;
-fi
-
-if [ ! "$interval" ]; then
-  interval=3600
-fi
-
 while true; do
-  echo $(date) : updating dns records
-  cat $file | xargs -l printf "http://dynamicdns.park-your-domain.com/update?host=%s&domain=%s&password=%s\n" | xargs -l curl -s > /dev/null
-  sleep $interval 
+  ip_address=$(dig ANY +short @resolver1.opendns.com myip.opendns.com)
+  echo "$(date --iso-8601=seconds): updating dns record: $CF_HOST_NAME --> $ip_address"
+  curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$CF_DNS_ID" \
+     -H "Authorization: Bearer $CF_AUTH_TOKEN" \
+     -H "Content-Type: application/json" \
+     --data "{\"type\":\"A\",\"name\":\"$CF_HOST_NAME\",\"content\":\"$ip_address\",\"ttl\":1,\"proxied\":$CF_PROXIED}" > /dev/null
+  sleep $CF_UPDATE_INTERNVAL
 done
+
