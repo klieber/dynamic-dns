@@ -1,5 +1,10 @@
 #!/bin/bash
 
+interval=3600
+if [ "$CF_UPDATE_INTERVAL" ]; then
+  interval="$CF_UPDATE_INTERVAL"
+fi
+
 while true; do
   ip_address=$(dig ANY +short @resolver1.opendns.com myip.opendns.com)
   echo "$(date --iso-8601=seconds): updating dns record: $CF_HOST_NAME --> $ip_address"
@@ -7,6 +12,6 @@ while true; do
      -H "Authorization: Bearer $CF_AUTH_TOKEN" \
      -H "Content-Type: application/json" \
      --data "{\"type\":\"A\",\"name\":\"$CF_HOST_NAME\",\"content\":\"$ip_address\",\"ttl\":1,\"proxied\":$CF_PROXIED}" > /dev/null
-  sleep $CF_UPDATE_INTERNVAL
+  sleep $interval
 done
 
