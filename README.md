@@ -1,9 +1,9 @@
 # dynamic-dns
 
-[![Docker Image Version (latest semver)](https://img.shields.io/docker/v/klieber/dynamic-dns?sort=semver)](https://github.com/klieber/dynamic-dns/releases)
-[![Docker Cloud Build Status](https://img.shields.io/docker/cloud/build/klieber/dynamic-dns)](https://hub.docker.com/r/klieber/dynamic-dns/builds)
-[![Docker Pulls](https://img.shields.io/docker/pulls/klieber/dynamic-dns)](https://hub.docker.com/r/klieber/dynamic-dns)
-[![Docker Image Size (tag)](https://img.shields.io/docker/image-size/klieber/dynamic-dns/latest)](https://hub.docker.com/r/klieber/dynamic-dns/tags)
+[![GitHub Release](https://img.shields.io/github/v/release/klieber/dynamic-dns)](https://github.com/klieber/dynamic-dns/releases)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/klieber/dynamic-dns/docker.yml?branch=master)](https://github.com/klieber/dynamic-dns/actions/workflows/docker.yml)
+[![Container Package](https://img.shields.io/badge/ghcr.io-klieber%2Fdynamic--dns-blue?logo=docker)](https://github.com/klieber/dynamic-dns/pkgs/container/dynamic-dns)
+[![License: MIT](https://img.shields.io/github/license/klieber/dynamic-dns)](https://github.com/klieber/dynamic-dns/blob/master/LICENSE)
 
 A lightweight containerized Dynamic DNS client for Cloudflare. It discovers your external public IPv4 address and updates matching Cloudflare DNS `A` records across your zones automatically.
 
