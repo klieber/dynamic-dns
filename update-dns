@@ -1,17 +1,224 @@
 #!/bin/bash
 
-interval=3600
-if [ "$CF_UPDATE_INTERVAL" ]; then
-  interval="$CF_UPDATE_INTERVAL"
+trap 'exit 0' SIGTERM SIGINT
+
+log() {
+  local ts
+  ts=$(date --iso-8601=seconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+  echo "$ts: $*"
+}
+
+interval="${CF_UPDATE_INTERVAL:-3600}"
+if ! [[ "$interval" =~ ^[0-9]+$ ]] || [ "$interval" -lt 1 ]; then
+  interval=3600
 fi
 
-while true; do
-  ip_address=$(dig ANY +short @resolver1.opendns.com myip.opendns.com)
-  echo "$(date --iso-8601=seconds): updating dns record: $CF_HOST_NAME --> $ip_address"
-  curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$CF_DNS_ID" \
-     -H "Authorization: Bearer $CF_AUTH_TOKEN" \
-     -H "Content-Type: application/json" \
-     --data "{\"type\":\"A\",\"name\":\"$CF_HOST_NAME\",\"content\":\"$ip_address\",\"ttl\":1,\"proxied\":$CF_PROXIED}" > /dev/null
-  sleep $interval
+if [ -z "$CF_AUTH_TOKEN" ]; then
+  log "ERROR: CF_AUTH_TOKEN environment variable is required."
+  exit 1
+fi
+
+if [ -z "$CF_DOMAINS" ]; then
+  if [ -n "$CF_HOST_NAME" ]; then
+    log "CF_DOMAINS not specified; falling back to CF_HOST_NAME ($CF_HOST_NAME)"
+    CF_DOMAINS="$CF_HOST_NAME"
+  else
+    log "ERROR: CF_DOMAINS environment variable is required (comma-separated list of domain names, e.g. CF_DOMAINS=home.kylelieber.com,ha.kylelieber.com)."
+    exit 1
+  fi
+fi
+
+# Parse CF_DOMAINS into array
+IFS=',' read -ra RAW_DOMAINS <<< "$CF_DOMAINS"
+DOMAINS=()
+for d in "${RAW_DOMAINS[@]}"; do
+  d=$(echo "$d" | tr -d '[:space:]')
+  if [ -n "$d" ]; then
+    DOMAINS+=("$d")
+  fi
 done
 
+if [ ${#DOMAINS[@]} -eq 0 ]; then
+  log "ERROR: No valid domain names found in CF_DOMAINS."
+  exit 1
+fi
+
+log "Starting dynamic-dns for ${#DOMAINS[@]} domain(s): ${DOMAINS[*]} (interval: ${interval}s)"
+
+while true; do
+  # 1. Resolve current public IPv4 address
+  ip_address=$(dig ANY +short @resolver1.opendns.com myip.opendns.com 2>/dev/null | tr -d '"' | head -n 1)
+  if [ -z "$ip_address" ]; then
+    ip_address=$(dig ANY +short @resolver2.opendns.com myip.opendns.com 2>/dev/null | tr -d '"' | head -n 1)
+  fi
+  if [ -z "$ip_address" ]; then
+    ip_address=$(curl -s -m 5 https://api.ipify.org 2>/dev/null || true)
+  fi
+
+  if ! [[ "$ip_address" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log "Failed to determine public IPv4 address (got: '$ip_address'); will retry in ${interval}s"
+    sleep "$interval" & wait $!
+    continue
+  fi
+
+  # 2. Fetch all active zones from Cloudflare
+  page=1
+  all_zones="[]"
+  fetch_zones_failed=false
+
+  while : ; do
+    resp=$(curl -s -m 30 -X GET "https://api.cloudflare.com/client/v4/zones?status=active&page=$page&per_page=50" \
+      -H "Authorization: Bearer $CF_AUTH_TOKEN" \
+      -H "Content-Type: application/json")
+
+    if [ -z "$resp" ]; then
+      log "Network error connecting to Cloudflare API while fetching zones"
+      fetch_zones_failed=true
+      break
+    fi
+
+    success=$(echo "$resp" | jq -r '.success // false' 2>/dev/null)
+    if [ "$success" != "true" ]; then
+      err_msg=$(echo "$resp" | jq -c '.errors // []' 2>/dev/null)
+      log "Error fetching Cloudflare zones: $err_msg"
+      fetch_zones_failed=true
+      break
+    fi
+
+    page_zones=$(echo "$resp" | jq '.result // []')
+    all_zones=$(jq -s '.[0] + .[1]' <(echo "$all_zones") <(echo "$page_zones"))
+
+    total_pages=$(echo "$resp" | jq -r '.result_info.total_pages // 1')
+    if [ "$page" -ge "$total_pages" ]; then
+      break
+    fi
+    page=$((page + 1))
+  done
+
+  if [ "$fetch_zones_failed" = "true" ]; then
+    sleep "$interval" & wait $!
+    continue
+  fi
+
+  zone_count=$(echo "$all_zones" | jq 'length')
+  if [ "$zone_count" -eq 0 ]; then
+    log "No active Cloudflare zones found for this account"
+    sleep "$interval" & wait $!
+    continue
+  fi
+
+  # 3. Fetch all A records for each zone
+  all_records="[]"
+  fetch_records_failed=false
+
+  for (( z=0; z<zone_count; z++ )); do
+    zone_id=$(echo "$all_zones" | jq -r ".[$z].id")
+    rec_page=1
+
+    while : ; do
+      rec_resp=$(curl -s -m 30 -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&page=$rec_page&per_page=100" \
+        -H "Authorization: Bearer $CF_AUTH_TOKEN" \
+        -H "Content-Type: application/json")
+
+      if [ -z "$rec_resp" ]; then
+        log "Network error connecting to Cloudflare API while fetching DNS records for zone $zone_id"
+        fetch_records_failed=true
+        break
+      fi
+
+      rec_success=$(echo "$rec_resp" | jq -r '.success // false' 2>/dev/null)
+      if [ "$rec_success" != "true" ]; then
+        err_msg=$(echo "$rec_resp" | jq -c '.errors // []' 2>/dev/null)
+        log "Error fetching DNS records for zone $zone_id: $err_msg"
+        fetch_records_failed=true
+        break
+      fi
+
+      page_records=$(echo "$rec_resp" | jq '.result // []')
+      all_records=$(jq -s '.[0] + .[1]' <(echo "$all_records") <(echo "$page_records"))
+
+      rec_total_pages=$(echo "$rec_resp" | jq -r '.result_info.total_pages // 1')
+      if [ "$rec_page" -ge "$rec_total_pages" ]; then
+        break
+      fi
+      rec_page=$((rec_page + 1))
+    done
+
+    if [ "$fetch_records_failed" = "true" ]; then
+      break
+    fi
+  done
+
+  if [ "$fetch_records_failed" = "true" ]; then
+    sleep "$interval" & wait $!
+    continue
+  fi
+
+  # 4. Check and update matching records
+  for target_domain in "${DOMAINS[@]}"; do
+    matching_records=$(echo "$all_records" | jq --arg d "$target_domain" '[.[] | select(.name == $d)]')
+    num_matches=$(echo "$matching_records" | jq 'length')
+
+    if [ "$num_matches" -eq 0 ]; then
+      log "WARNING: No existing A record found for $target_domain across active zones"
+      continue
+    fi
+
+    for (( m=0; m<num_matches; m++ )); do
+      rec=$(echo "$matching_records" | jq ".[$m]")
+      rec_id=$(echo "$rec" | jq -r '.id')
+      rec_zone_id=$(echo "$rec" | jq -r '.zone_id')
+      rec_ip=$(echo "$rec" | jq -r '.content')
+      rec_proxied=$(echo "$rec" | jq -r '.proxied // false')
+      rec_ttl=$(echo "$rec" | jq -r '.ttl // 1')
+
+      # Determine target proxied state:
+      # If CF_PROXIED is explicitly set, use it; otherwise maintain current proxied state
+      if [ -n "$CF_PROXIED" ]; then
+        target_proxied=$(jq -n --arg p "$CF_PROXIED" 'if $p == "true" then true else false end')
+      else
+        target_proxied="$rec_proxied"
+      fi
+
+      needs_update=false
+      if [ "$rec_ip" != "$ip_address" ]; then
+        needs_update=true
+      fi
+      if [ "$rec_proxied" != "$target_proxied" ]; then
+        needs_update=true
+      fi
+      if [ "$CF_FORCE_UPDATE" = "true" ]; then
+        needs_update=true
+      fi
+
+      if [ "$needs_update" = "true" ]; then
+        log "updating dns record: $target_domain ($rec_ip --> $ip_address, proxied: $target_proxied)"
+
+        payload=$(jq -n \
+          --arg type "A" \
+          --arg name "$target_domain" \
+          --arg content "$ip_address" \
+          --argjson ttl "$rec_ttl" \
+          --argjson proxied "$target_proxied" \
+          '{type: $type, name: $name, content: $content, ttl: $ttl, proxied: $proxied}')
+
+        put_resp=$(curl -s -m 30 -X PUT "https://api.cloudflare.com/client/v4/zones/$rec_zone_id/dns_records/$rec_id" \
+          -H "Authorization: Bearer $CF_AUTH_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data "$payload")
+
+        put_success=$(echo "$put_resp" | jq -r '.success // false' 2>/dev/null)
+        if [ "$put_success" = "true" ]; then
+          log "successfully updated $target_domain --> $ip_address"
+        else
+          put_err=$(echo "$put_resp" | jq -c '.errors // []' 2>/dev/null)
+          log "failed to update $target_domain: $put_err"
+        fi
+      else
+        log "dns record $target_domain is already up to date ($ip_address)"
+      fi
+    done
+  done
+
+  sleep "$interval" & wait $!
+done

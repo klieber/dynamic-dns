@@ -1,7 +1,8 @@
-FROM ubuntu:20.04
+FROM alpine:3.20
 
-RUN apt-get -q update && apt-get install -y dnsutils curl && apt-get clean
+RUN apk add --no-cache bash bind-tools curl jq
 
-ADD update-dns /update-dns
+COPY update-dns /update-dns
+RUN chmod +x /update-dns
 
 ENTRYPOINT ["/update-dns"]
